@@ -1,0 +1,10 @@
+import { useEffect, useState } from 'react'
+import { Loader2, Save } from 'lucide-react'
+import { useAuth } from '@/auth/AuthProvider'
+import { updateProfile } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { useToast } from '@/components/ui/toast'
+
+export function ProfileForm() { const { token, user, refreshUser } = useAuth(); const { show } = useToast(); const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [loading, setLoading] = useState(false); useEffect(() => { setName(user?.name || ''); setEmail(user?.email || '') }, [user]); const submit = async (event: React.FormEvent) => { event.preventDefault(); if (!token) return; setLoading(true); try { await updateProfile(token, { name: name.trim(), email: email.trim() }); await refreshUser(); show('Profile updated', 'Your account details have been saved.') } catch (error) { show('Update failed', error instanceof Error ? error.message : 'Unable to update your profile.') } finally { setLoading(false) } }; return <Card className="p-6 sm:p-8"><div className="border-b border-slate-100 pb-5 dark:border-slate-800"><h2 className="text-lg font-bold text-slate-950 dark:text-white">Personal details</h2><p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Keep the identity your team sees up to date.</p></div><form onSubmit={submit} className="mt-7 max-w-xl space-y-5"><div><label htmlFor="profile-name" className="mb-2 block text-sm font-bold text-slate-800 dark:text-slate-200">Full name</label><Input id="profile-name" value={name} onChange={event => setName(event.target.value)} required /></div><div><label htmlFor="profile-email" className="mb-2 block text-sm font-bold text-slate-800 dark:text-slate-200">Email address</label><Input id="profile-email" type="email" value={email} onChange={event => setEmail(event.target.value)} required /></div><Button type="submit" disabled={loading}>{loading ? <><Loader2 size={16} className="animate-spin" />Saving...</> : <><Save size={16} />Save changes</>}</Button></form></Card> }

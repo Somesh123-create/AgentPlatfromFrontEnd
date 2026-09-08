@@ -1,0 +1,17 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { font-family: 'Manrope', sans-serif; color: #0f172a; background: #f7f8fb; font-synthesis: none; text-rendering: optimizeLegibility; }
+html { scroll-behavior: smooth; }
+body { margin: 0; min-width: 320px; background: #f7f8fb; }
+.dark body, .dark { background: #080d18; color: #f8fafc; }
+* { box-sizing: border-box; }
+input.peer:checked + span svg { opacity: 1; }
+::selection { background: #bfd0ff; color: #172554; }
+.mesh { background-image: linear-gradient(rgba(148,163,184,.12) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.12) 1px, transparent 1px); background-size: 32px 32px; mask-image: linear-gradient(to bottom, black, transparent 90%); }
+.dark .mesh { background-image: linear-gradient(rgba(148,163,184,.09) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.09) 1px, transparent 1px); }
+@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+.animate-float { animation: float 6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; } }
