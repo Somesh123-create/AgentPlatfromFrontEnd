@@ -7,8 +7,6 @@ import {
   Loader2,
   Network,
   RefreshCw,
-  Rocket,
-  Square,
   TerminalSquare,
   UploadCloud,
 } from 'lucide-react'
@@ -23,19 +21,14 @@ import { useAuth } from '@/auth/AuthProvider'
 
 import {
   buildMcpVersion,
-  deployMcpVersion,
   getMcp,
   listMcpBuilds,
-  listMcpDeployments,
   listMcpVersions,
   invokeTool as invokeMcpTool,
   listTools,
-  restartMcp,
-  undeployMcp,
   uploadMcpVersion,
   type Mcp,
   type McpBuild,
-  type McpDeployment,
   type McpVersion,
 } from '@/lib/api'
 
@@ -58,6 +51,14 @@ type InvocationResult = {
   status: string
 }
 
+type InvocationHistoryItem = InvocationResult & {
+  id: number
+  toolName: string
+  version: number
+  input: object
+  createdAt: string
+}
+
 export function McpDetailPage() {
   const { id } = useParams()
   const { token } = useAuth()
@@ -66,12 +67,12 @@ export function McpDetailPage() {
   const [mcp, setMcp] = useState<Mcp | null>(null)
   const [versions, setVersions] = useState<McpVersion[]>([])
   const [builds, setBuilds] = useState<McpBuild[]>([])
-  const [deployments, setDeployments] = useState<McpDeployment[]>([])
+  const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null)
 
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
   const [building, setBuilding] = useState(false)
-  const [deploying, setDeploying] = useState(false)
 
   const [loadingTools, setLoadingTools] = useState(false)
   const [invoking, setInvoking] = useState(false)
@@ -82,6 +83,7 @@ export function McpDetailPage() {
 
   const [invocationResult, setInvocationResult] =
     useState<InvocationResult | null>(null)
+  const [invocationHistory, setInvocationHistory] = useState<InvocationHistoryItem[]>([])
 
   const mcpId = id ? Number(id) : null
 
@@ -97,31 +99,32 @@ export function McpDetailPage() {
       mcpId === null ||
       Number.isNaN(mcpId)
     ) {
+      setLoading(false)
       return
     }
 
     setLoading(true)
+    setLoadError(null)
 
     Promise.all([
       getMcp(token, mcpId),
       listMcpVersions(token, mcpId),
       listMcpBuilds(token, mcpId),
-      listMcpDeployments(token, mcpId),
     ])
       .then(
         ([
           server,
           serverVersions,
           serverBuilds,
-          serverDeployments,
         ]) => {
           setMcp(server)
           setVersions(serverVersions)
           setBuilds(serverBuilds)
-          setDeployments(serverDeployments)
+          setSelectedVersionId(serverVersions[0]?.id ?? null)
         },
       )
       .catch((error) => {
+        setLoadError(error instanceof Error ? error.message : 'Request failed.')
         show(
           'Unable to load MCP server',
           error instanceof Error
@@ -170,6 +173,7 @@ export function McpDetailPage() {
         version,
         ...items,
       ])
+      setSelectedVersionId(version.id)
 
       show(
         'Version uploaded',
@@ -189,15 +193,20 @@ export function McpDetailPage() {
 
   /*
    * ---------------------------------------------------------
-   * Build latest version
+  * Build selected version
    * ---------------------------------------------------------
    */
 
-  const buildLatest = async () => {
+  const selectedVersion = versions.find((version) => version.id === selectedVersionId) ?? null
+  const selectedBuild = selectedVersion
+    ? builds.find((build) => build.version_id === selectedVersion.id && build.status === 'SUCCEEDED') ?? null
+    : null
+
+  const buildSelected = async () => {
     if (
       !token ||
       mcpId === null ||
-      !versions[0]
+      !selectedVersion
     ) {
       show(
         'Upload a version first',
@@ -212,7 +221,7 @@ export function McpDetailPage() {
       const build = await buildMcpVersion(
         token,
         mcpId,
-        versions[0].version,
+        selectedVersion.version,
       )
 
       setBuilds((items) => [
@@ -237,152 +246,6 @@ export function McpDetailPage() {
       )
     } finally {
       setBuilding(false)
-    }
-  }
-
-  /*
-   * ---------------------------------------------------------
-   * Deploy latest version
-   * ---------------------------------------------------------
-   */
-
-  const deployLatest = async () => {
-    if (
-      !token ||
-      mcpId === null ||
-      !versions[0]
-    ) {
-      show(
-        'Upload a version first',
-        'Deployment requires a validated version.',
-      )
-      return
-    }
-
-    setDeploying(true)
-
-    try {
-      const deployment =
-        await deployMcpVersion(
-          token,
-          mcpId,
-          versions[0].version,
-        )
-
-      setDeployments((items) => [
-        deployment,
-        ...items,
-      ])
-
-      show(
-        deployment.status === 'RUNNING'
-          ? 'MCP deployed'
-          : 'Deployment failed',
-        deployment.error ||
-          deployment.image_ref ||
-          'Deployment completed.',
-      )
-    } catch (error) {
-      show(
-        'Deployment failed',
-        error instanceof Error
-          ? error.message
-          : 'Unable to deploy MCP server.',
-      )
-    } finally {
-      setDeploying(false)
-    }
-  }
-
-  /*
-   * ---------------------------------------------------------
-   * Stop deployment
-   * ---------------------------------------------------------
-   */
-
-  const stopDeployment = async (
-    deployment: McpDeployment,
-  ) => {
-    if (
-      !token ||
-      mcpId === null
-    ) {
-      return
-    }
-
-    try {
-      const updated =
-        await undeployMcp(
-          token,
-          mcpId,
-          deployment.id,
-        )
-
-      setDeployments((items) =>
-        items.map((item) =>
-          item.id === updated.id
-            ? updated
-            : item,
-        ),
-      )
-
-      show(
-        'MCP undeployed',
-        'The runtime container was stopped.',
-      )
-    } catch (error) {
-      show(
-        'Undeploy failed',
-        error instanceof Error
-          ? error.message
-          : 'Unable to stop deployment.',
-      )
-    }
-  }
-
-  /*
-   * ---------------------------------------------------------
-   * Restart deployment
-   * ---------------------------------------------------------
-   */
-
-  const restartDeployment = async (
-    deployment: McpDeployment,
-  ) => {
-    if (
-      !token ||
-      mcpId === null
-    ) {
-      return
-    }
-
-    try {
-      const updated =
-        await restartMcp(
-          token,
-          mcpId,
-          deployment.id,
-        )
-
-      setDeployments((items) =>
-        items.map((item) =>
-          item.id === updated.id
-            ? updated
-            : item,
-        ),
-      )
-
-      show(
-        'MCP restarted',
-        updated.status,
-      )
-    } catch (error) {
-      show(
-        'Restart failed',
-        error instanceof Error
-          ? error.message
-          : 'Unable to restart deployment.',
-      )
     }
   }
 
@@ -537,6 +400,24 @@ export function McpDetailPage() {
     }
   }
 
+  useEffect(() => {
+    if (!token || mcpId === null || !selectedVersion) {
+      setTools([])
+      setSelectedTool('')
+      setToolInput('{}')
+      setInvocationResult(null)
+      setInvocationHistory([])
+      return
+    }
+
+    setTools([])
+    setSelectedTool('')
+    setToolInput('{}')
+    setInvocationResult(null)
+    setInvocationHistory([])
+    void listAvailableTools()
+  }, [selectedVersionId])
+
   /*
    * ---------------------------------------------------------
    * Discover MCP tools
@@ -558,7 +439,7 @@ export function McpDetailPage() {
       if (
         !token ||
         mcpId === null ||
-        !versions[0]
+        !selectedVersion
       ) {
         show(
           'Select a version first',
@@ -575,7 +456,7 @@ export function McpDetailPage() {
           await listTools(
             token,
             mcpId,
-            versions[0].version,
+            selectedVersion.id,
           )
 
         /*
@@ -687,7 +568,7 @@ export function McpDetailPage() {
         return
       }
 
-      if (!versions[0]) {
+      if (!selectedVersion) {
         show(
           'No version available',
           'Upload an MCP version first.',
@@ -752,7 +633,7 @@ export function McpDetailPage() {
           await invokeMcpTool(
             token,
             Number(mcpId),
-            versions[0].version,
+            selectedVersion.id,
             selectedTool,
             parsedInput,
           )
@@ -760,6 +641,17 @@ export function McpDetailPage() {
         setInvocationResult(
           result,
         )
+        setInvocationHistory((items) => [
+          {
+            id: Date.now(),
+            toolName: selectedTool,
+            version: selectedVersion.version,
+            input: parsedInput,
+            createdAt: new Date().toISOString(),
+            ...result,
+          },
+          ...items,
+        ].slice(0, 20))
 
         if (
           result.status ===
@@ -836,7 +728,7 @@ export function McpDetailPage() {
       <WorkspaceLayout>
         <div className="mx-auto max-w-3xl px-5 py-16 text-center">
           <p className="text-sm text-slate-500">
-            This MCP server could not be found.
+            {loadError || 'This MCP server could not be found.'}
           </p>
 
           <Link
@@ -964,16 +856,16 @@ export function McpDetailPage() {
             )}
           </Card>
 
-          {/* Build + Deploy */}
+          {/* Build + Test */}
           <Card className="p-6">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="font-bold text-slate-950 dark:text-white">
-                  Build and deploy
+                  Build and test
                 </h2>
 
                 <p className="mt-1 text-xs text-slate-500">
-                  Build a local OCI image from the latest validated version.
+                  Build a local OCI image from the selected validated version.
                 </p>
               </div>
 
@@ -982,17 +874,32 @@ export function McpDetailPage() {
               </Badge>
             </div>
 
-            <div className="mt-6 grid gap-3 sm:grid-cols-3">
+            <label className="mt-6 block text-xs font-bold uppercase tracking-wider text-slate-400">
+              Version to build
+              <select
+                value={selectedVersionId ?? ''}
+                onChange={(event) => setSelectedVersionId(Number(event.target.value))}
+                disabled={building || versions.length === 0}
+                className="mt-2 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-normal normal-case tracking-normal text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+              >
+                {versions.map((version) => (
+                  <option key={version.id} value={version.id}>
+                    Version {version.version} · {version.source_kind}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="mt-6 grid gap-3 sm:grid-cols-2">
 
               <Button
                 type="button"
                 disabled={
                   building ||
-                  deploying ||
                   versions.length === 0
                 }
                 onClick={
-                  buildLatest
+                  buildSelected
                 }
               >
                 {building ? (
@@ -1012,23 +919,6 @@ export function McpDetailPage() {
               </Button>
 
               <LiveAction
-                icon={Rocket}
-                label={
-                  deploying
-                    ? 'Deploying...'
-                    : 'Deploy server'
-                }
-                disabled={
-                  building ||
-                  deploying ||
-                  versions.length === 0
-                }
-                onClick={
-                  deployLatest
-                }
-              />
-
-              <LiveAction
                 icon={TerminalSquare}
                 label={
                   loadingTools
@@ -1037,9 +927,8 @@ export function McpDetailPage() {
                 }
                 disabled={
                   building ||
-                  deploying ||
                   loadingTools ||
-                  versions.length === 0
+                  !selectedBuild
                 }
                 onClick={
                   listAvailableTools
@@ -1048,25 +937,25 @@ export function McpDetailPage() {
             </div>
 
             {/* Latest build */}
-            {builds.length > 0 && (
+            {selectedVersion && builds.some((build) => build.version_id === selectedVersion.id) && (
               <div className="mt-5 rounded-xl bg-slate-50 p-4 dark:bg-slate-800">
                 <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
                   Latest build
                 </p>
 
                 <p className="mt-2 text-sm font-bold text-slate-900 dark:text-white">
-                  {builds[0].status}
+                  Version {builds.find((build) => build.version_id === selectedVersion.id)?.version} · {builds.find((build) => build.version_id === selectedVersion.id)?.status}
                 </p>
 
-                {builds[0].error && (
+                {builds.find((build) => build.version_id === selectedVersion.id)?.error && (
                   <p className="mt-1 text-xs text-rose-500">
-                    {builds[0].error}
+                    {builds.find((build) => build.version_id === selectedVersion.id)?.error}
                   </p>
                 )}
 
-                {builds[0].image_ref && (
+                {builds.find((build) => build.version_id === selectedVersion.id)?.image_ref && (
                   <p className="mt-1 truncate font-mono text-[11px] text-slate-400">
-                    {builds[0].image_ref}
+                    {builds.find((build) => build.version_id === selectedVersion.id)?.image_ref}
                   </p>
                 )}
               </div>
@@ -1144,152 +1033,6 @@ export function McpDetailPage() {
           )}
         </Card>
 
-        {/* Deployments */}
-        <Card className="mt-5 p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="font-bold text-slate-950 dark:text-white">
-                Deployments
-              </h2>
-
-              <p className="mt-1 text-xs text-slate-500">
-                Runtime instances of this MCP server.
-              </p>
-            </div>
-
-            <span className="text-xs font-bold text-slate-400">
-              {deployments.length} total
-            </span>
-          </div>
-
-          {deployments.length === 0 ? (
-            <EmptyState
-              icon={Rocket}
-              message="No deployments yet."
-            />
-          ) : (
-            <div className="mt-5 space-y-3">
-              {deployments.map(
-                (deployment) => {
-                  const isRunning =
-                    deployment.status ===
-                    'RUNNING'
-
-                  return (
-                    <div
-                      key={
-                        deployment.id
-                      }
-                      className="rounded-xl bg-slate-50 p-4 dark:bg-slate-800"
-                    >
-                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-
-                        <span
-                          className={`flex h-9 w-9 items-center justify-center rounded-lg ${
-                            isRunning
-                              ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300'
-                              : 'bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-300'
-                          }`}
-                        >
-                          {isRunning ? (
-                            <CheckCircle2
-                              size={17}
-                            />
-                          ) : (
-                            <Square
-                              size={15}
-                            />
-                          )}
-                        </span>
-
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-bold text-slate-900 dark:text-white">
-                            Deployment #
-                            {
-                              deployment.id
-                            }
-                          </p>
-
-                          <p className="mt-1 text-xs text-slate-500">
-                            Status:{' '}
-                            <span className="font-semibold">
-                              {
-                                deployment.status
-                              }
-                            </span>
-                          </p>
-
-                          {deployment.image_ref && (
-                            <p className="mt-1 truncate font-mono text-[11px] text-slate-400">
-                              {
-                                deployment.image_ref
-                              }
-                            </p>
-                          )}
-
-                          {deployment.error && (
-                            <p className="mt-1 text-xs text-rose-500">
-                              {
-                                deployment.error
-                              }
-                            </p>
-                          )}
-                        </div>
-
-                        <Badge>
-                          {
-                            deployment.status
-                          }
-                        </Badge>
-
-                        <div className="flex gap-2">
-                          {isRunning ? (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                stopDeployment(
-                                  deployment,
-                                )
-                              }
-                            >
-                              <Square
-                                size={
-                                  14
-                                }
-                              />
-                              Stop
-                            </Button>
-                          ) : (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                restartDeployment(
-                                  deployment,
-                                )
-                              }
-                            >
-                              <RefreshCw
-                                size={
-                                  14
-                                }
-                              />
-                              Restart
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                },
-              )}
-            </div>
-          )}
-        </Card>
-
         {/* Tools */}
         <Card className="mt-5 p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -1343,6 +1086,16 @@ export function McpDetailPage() {
               icon={TerminalSquare}
               message="Upload a version before discovering tools."
             />
+          ) : !selectedBuild ? (
+            <EmptyState
+              icon={Box}
+              message="Build the selected version before testing tools."
+            />
+          ) : loadingTools ? (
+            <div className="mt-7 flex items-center justify-center gap-2 rounded-xl border border-dashed border-slate-200 p-8 text-sm text-slate-500 dark:border-slate-700">
+              <Loader2 size={18} className="animate-spin text-blue-600" />
+              Starting the selected MCP build...
+            </div>
           ) : tools.length === 0 ? (
             <div className="mt-7 rounded-xl border border-dashed border-slate-200 p-8 text-center dark:border-slate-700">
               <TerminalSquare
@@ -1447,6 +1200,17 @@ export function McpDetailPage() {
                   )}
                 </div>
 
+                {selectedTool && (
+                  <details className="mt-4 rounded-xl bg-slate-50 p-3 dark:bg-slate-900">
+                    <summary className="cursor-pointer text-xs font-bold uppercase tracking-wider text-slate-400">
+                      Input schema
+                    </summary>
+                    <pre className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-slate-600 dark:text-slate-300">
+                      {formatOutput(JSON.stringify(getToolSchema(tools.find((tool) => getToolName(tool) === selectedTool) ?? { id: selectedTool }) ?? {}, null, 2))}
+                    </pre>
+                  </details>
+                )}
+
                 <div className="mt-5">
                   <label
                     htmlFor="tool-input"
@@ -1548,6 +1312,37 @@ export function McpDetailPage() {
                         )}
                       </pre>
                     )}
+                  </div>
+                )}
+
+                {invocationHistory.length > 0 && (
+                  <div className="mt-6 border-t border-slate-200 pt-5 dark:border-slate-700">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                        Recent calls
+                      </p>
+                      <span className="text-xs text-slate-400">{invocationHistory.length}</span>
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {invocationHistory.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedTool(item.toolName)
+                            setToolInput(JSON.stringify(item.input, null, 2))
+                            setInvocationResult(item)
+                          }}
+                          className="flex w-full items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-left hover:bg-blue-50 dark:bg-slate-900 dark:hover:bg-slate-800"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate font-mono text-xs font-bold text-slate-700 dark:text-slate-200">{item.toolName}</span>
+                            <span className="text-[10px] text-slate-400">Version {item.version} · {new Date(item.createdAt).toLocaleTimeString()}</span>
+                          </span>
+                          <Badge className={item.status === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700'}>{item.status}</Badge>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
