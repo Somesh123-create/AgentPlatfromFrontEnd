@@ -3,10 +3,16 @@ import {
   ArrowLeft,
   Box,
   CheckCircle2,
+  Download,
   FileArchive,
+  FileCode2,
+  FolderPlus,
   Loader2,
   Network,
+  Plus,
   RefreshCw,
+  Save,
+  Trash2,
   TerminalSquare,
   UploadCloud,
 } from 'lucide-react'
@@ -21,11 +27,18 @@ import { useAuth } from '@/auth/AuthProvider'
 
 import {
   buildMcpVersion,
+  createMcpFolder,
+  deleteMcpFile,
+  exportMcp,
+  generateMcp,
   getMcp,
+  getMcpProject,
   listMcpBuilds,
   listMcpVersions,
   invokeTool as invokeMcpTool,
   listTools,
+  getMcpRuntimeLogs,
+  updateMcpFile,
   uploadMcpVersion,
   type Mcp,
   type McpBuild,
@@ -59,6 +72,8 @@ type InvocationHistoryItem = InvocationResult & {
   createdAt: string
 }
 
+type RuntimeLog = { time: string; message: string; level: string }
+
 export function McpDetailPage() {
   const { id } = useParams()
   const { token } = useAuth()
@@ -73,6 +88,12 @@ export function McpDetailPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
   const [building, setBuilding] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [project, setProject] = useState<{ version_id: number; revision: number; files: Record<string, string> } | null>(null)
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [fileContent, setFileContent] = useState('')
+  const [savingFile, setSavingFile] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const [loadingTools, setLoadingTools] = useState(false)
   const [invoking, setInvoking] = useState(false)
@@ -84,6 +105,10 @@ export function McpDetailPage() {
   const [invocationResult, setInvocationResult] =
     useState<InvocationResult | null>(null)
   const [invocationHistory, setInvocationHistory] = useState<InvocationHistoryItem[]>([])
+  const [runtimeError, setRuntimeError] = useState<string | null>(null)
+  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLog[]>([])
+  const [loadingRuntimeLogs, setLoadingRuntimeLogs] = useState(false)
+  const [runtimeLogsTruncated, setRuntimeLogsTruncated] = useState(false)
 
   const mcpId = id ? Number(id) : null
 
@@ -201,6 +226,123 @@ export function McpDetailPage() {
   const selectedBuild = selectedVersion
     ? builds.find((build) => build.version_id === selectedVersion.id && build.status === 'SUCCEEDED') ?? null
     : null
+  const latestBuild = selectedVersion
+    ? builds.find((build) => build.version_id === selectedVersion.id) ?? null
+    : null
+
+  const transport = mcp
+    ? ({ STDIO: 'stdio', SSE: 'sse', STREAMABLE_HTTP: 'streamable-http' } as const)[mcp.protocol]
+    : null
+
+  const loadRuntimeLogs = async () => {
+    if (!token || mcpId === null || !selectedVersion) {
+      setRuntimeLogs([])
+      setRuntimeLogsTruncated(false)
+      return
+    }
+    setLoadingRuntimeLogs(true)
+    try {
+      const result = await getMcpRuntimeLogs(token, mcpId, selectedVersion.version)
+      setRuntimeLogs(result.entries)
+      setRuntimeLogsTruncated(result.truncated)
+    } catch (error) {
+      setRuntimeLogs([])
+      setRuntimeLogsTruncated(false)
+      setRuntimeError(error instanceof Error ? error.message : 'Unable to load runtime logs.')
+    } finally {
+      setLoadingRuntimeLogs(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!token || mcpId === null || !selectedVersion) {
+      setProject(null)
+      setSelectedFile(null)
+      return
+    }
+    getMcpProject(token, mcpId, selectedVersion.version)
+      .then((loaded) => {
+        setProject(loaded)
+        setSelectedFile((current) => current && loaded.files[current] !== undefined ? current : Object.keys(loaded.files)[0] || null)
+      })
+      .catch(() => setProject(null))
+  }, [token, mcpId, selectedVersionId])
+
+  useEffect(() => {
+    setFileContent(selectedFile && project?.files[selectedFile] !== undefined ? project.files[selectedFile] : '')
+  }, [selectedFile, project])
+
+  useEffect(() => {
+    void loadRuntimeLogs()
+  }, [token, mcpId, selectedVersionId])
+
+  const refreshProject = async (version = selectedVersion) => {
+    if (!token || mcpId === null || !version) return
+    const loaded = await getMcpProject(token, mcpId, version.version)
+    setProject(loaded)
+    setSelectedFile(Object.keys(loaded.files)[0] || null)
+  }
+
+  const generateCode = async () => {
+    if (!token || mcpId === null) return
+    setGenerating(true)
+    try {
+      const generated = await generateMcp(token, mcpId)
+      const nextVersions = [generated, ...versions]
+      setVersions(nextVersions)
+      setSelectedVersionId(generated.id)
+      show('Sample MCP generated', 'A runnable server, manifest, requirements, and environment file are ready to edit.')
+    } catch (error) {
+      show('Generation failed', error instanceof Error ? error.message : 'Unable to generate MCP code.')
+    } finally { setGenerating(false) }
+  }
+
+  const saveFile = async () => {
+    if (!token || mcpId === null || !selectedVersion || !project || !selectedFile) return
+    setSavingFile(true)
+    try {
+      const updated = await updateMcpFile(token, mcpId, selectedVersion.version, selectedFile, fileContent, project.revision)
+      setProject(updated)
+      show('File saved', selectedFile)
+    } catch (error) { show('File save failed', error instanceof Error ? error.message : 'Unable to save file.') }
+    finally { setSavingFile(false) }
+  }
+
+  const createFile = async () => {
+    const path = window.prompt('New file path', 'tools.py')?.trim()
+    if (!token || mcpId === null || !selectedVersion || !project || !path) return
+    try {
+      const updated = await updateMcpFile(token, mcpId, selectedVersion.version, path, '', project.revision)
+      setProject(updated); setSelectedFile(path); show('File created', path)
+    } catch (error) { show('File creation failed', error instanceof Error ? error.message : 'Unable to create file.') }
+  }
+
+  const createFolder = async () => {
+    const path = window.prompt('New folder path', 'src')?.trim()
+    if (!token || mcpId === null || !selectedVersion || !project || !path) return
+    try {
+      const updated = await createMcpFolder(token, mcpId, selectedVersion.version, path, project.revision)
+      setProject(updated); show('Folder created', path)
+    } catch (error) { show('Folder creation failed', error instanceof Error ? error.message : 'Unable to create folder.') }
+  }
+
+  const removeFile = async () => {
+    if (!token || mcpId === null || !selectedVersion || !project || !selectedFile || !window.confirm(`Delete ${selectedFile}?`)) return
+    try {
+      const updated = await deleteMcpFile(token, mcpId, selectedVersion.version, selectedFile, project.revision)
+      setProject(updated); setSelectedFile(Object.keys(updated.files)[0] || null); show('File deleted', selectedFile)
+    } catch (error) { show('Delete failed', error instanceof Error ? error.message : 'Unable to delete file.') }
+  }
+
+  const downloadProject = async () => {
+    if (!token || mcpId === null || !selectedVersion) return
+    setExporting(true)
+    try {
+      const archive = await exportMcp(token, mcpId, selectedVersion.version)
+      const url = URL.createObjectURL(archive); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${mcp?.name || 'mcp'}-v${selectedVersion.version}.zip`; document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url)
+    } catch (error) { show('Export failed', error instanceof Error ? error.message : 'Unable to export MCP project.') }
+    finally { setExporting(false) }
+  }
 
   const buildSelected = async () => {
     if (
@@ -224,10 +366,7 @@ export function McpDetailPage() {
         selectedVersion.version,
       )
 
-      setBuilds((items) => [
-        build,
-        ...items,
-      ])
+      setBuilds((items) => [build, ...items.filter((item) => item.id !== build.id)])
 
       show(
         build.status === 'SUCCEEDED'
@@ -414,8 +553,8 @@ export function McpDetailPage() {
     setSelectedTool('')
     setToolInput('{}')
     setInvocationResult(null)
+    setRuntimeError(null)
     setInvocationHistory([])
-    void listAvailableTools()
   }, [selectedVersionId])
 
   /*
@@ -470,6 +609,8 @@ export function McpDetailPage() {
 
         if (result.error) {
           setTools([])
+          setRuntimeError(result.error)
+          await loadRuntimeLogs()
 
           show(
             'Tool listing failed',
@@ -486,6 +627,8 @@ export function McpDetailPage() {
         setTools(
           discoveredTools,
         )
+        setRuntimeError(null)
+        await loadRuntimeLogs()
 
         if (
           discoveredTools.length === 0
@@ -538,6 +681,8 @@ export function McpDetailPage() {
           `${discoveredTools.length} tool(s) available.`,
         )
       } catch (error) {
+        setRuntimeError(error instanceof Error ? error.message : 'Unable to list tools.')
+        await loadRuntimeLogs()
         show(
           'Tool discovery failed',
           error instanceof Error
@@ -641,6 +786,8 @@ export function McpDetailPage() {
         setInvocationResult(
           result,
         )
+        setRuntimeError(result.error)
+        await loadRuntimeLogs()
         setInvocationHistory((items) => [
           {
             id: Date.now(),
@@ -670,6 +817,8 @@ export function McpDetailPage() {
           )
         }
       } catch (error) {
+        setRuntimeError(error instanceof Error ? error.message : 'Unable to invoke tool.')
+        await loadRuntimeLogs()
         show(
           'Invocation failed',
           error instanceof Error
@@ -750,7 +899,7 @@ export function McpDetailPage() {
 
   return (
     <WorkspaceLayout>
-      <main className="mx-auto max-w-7xl px-5 py-8 lg:px-10 lg:py-12">
+      <main className="mx-auto min-w-0 max-w-7xl overflow-x-hidden px-4 py-6 sm:px-5 sm:py-8 lg:px-10 lg:py-12">
 
         {/* Back */}
         <Link
@@ -778,6 +927,10 @@ export function McpDetailPage() {
                   {mcp.description ||
                     'No description provided.'}
                 </p>
+                <div className="mt-3 flex min-w-0 flex-wrap gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  <span className="max-w-full break-words rounded-md bg-slate-100 px-2 py-1 dark:bg-slate-800">Protocol: {mcp.protocol}</span>
+                  <span className="max-w-full break-words rounded-md bg-cyan-50 px-2 py-1 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300">MCP_TRANSPORT: {transport}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -788,10 +941,10 @@ export function McpDetailPage() {
         </div>
 
         {/* Upload + Build */}
-        <div className="mt-10 grid gap-5 lg:grid-cols-[.8fr_1.2fr]">
+        <div className="mt-8 grid min-w-0 gap-5 lg:grid-cols-[minmax(0,.8fr)_minmax(0,1.2fr)] lg:mt-10">
 
           {/* Upload */}
-          <Card className="p-6">
+          <Card className="min-w-0 p-5 sm:p-6">
             <div className="flex items-center gap-3">
               <FileArchive
                 size={18}
@@ -857,7 +1010,7 @@ export function McpDetailPage() {
           </Card>
 
           {/* Build + Test */}
-          <Card className="p-6">
+          <Card className="min-w-0 p-5 sm:p-6">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="font-bold text-slate-950 dark:text-white">
@@ -918,6 +1071,10 @@ export function McpDetailPage() {
                 )}
               </Button>
 
+              <Button type="button" variant="secondary" disabled={generating} onClick={generateCode}>
+                {generating ? <><Loader2 size={15} className="animate-spin" />Generating...</> : <><FileCode2 size={15} />Generate code</>}
+              </Button>
+
               <LiveAction
                 icon={TerminalSquare}
                 label={
@@ -937,34 +1094,64 @@ export function McpDetailPage() {
             </div>
 
             {/* Latest build */}
-            {selectedVersion && builds.some((build) => build.version_id === selectedVersion.id) && (
+            {latestBuild && (
               <div className="mt-5 rounded-xl bg-slate-50 p-4 dark:bg-slate-800">
                 <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  Latest build
+                  Image build · {latestBuild.status === 'QUEUED' || latestBuild.status === 'BUILDING' ? 'Live' : 'Finished'}
                 </p>
 
                 <p className="mt-2 text-sm font-bold text-slate-900 dark:text-white">
-                  Version {builds.find((build) => build.version_id === selectedVersion.id)?.version} · {builds.find((build) => build.version_id === selectedVersion.id)?.status}
+                  Version {latestBuild.version} · {latestBuild.status}
                 </p>
 
-                {builds.find((build) => build.version_id === selectedVersion.id)?.error && (
+                {latestBuild.error && (
                   <p className="mt-1 text-xs text-rose-500">
-                    {builds.find((build) => build.version_id === selectedVersion.id)?.error}
+                    {latestBuild.error}
                   </p>
                 )}
 
-                {builds.find((build) => build.version_id === selectedVersion.id)?.image_ref && (
+                {latestBuild.image_ref && (
                   <p className="mt-1 truncate font-mono text-[11px] text-slate-400">
-                    {builds.find((build) => build.version_id === selectedVersion.id)?.image_ref}
+                    {latestBuild.image_ref}
                   </p>
                 )}
+                <pre className="mt-3 max-h-48 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 font-mono text-[11px] leading-5 text-emerald-300">{latestBuild.logs || 'Waiting for build output...'}</pre>
               </div>
             )}
           </Card>
         </div>
 
+        {project && selectedVersion && (
+          <Card className="mt-5 min-w-0 overflow-hidden p-0">
+            <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-950 px-5 py-4 text-white sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-bold"><FileCode2 size={16} className="text-cyan-300" /> MCP project workspace</div>
+                <p className="mt-1 text-xs text-slate-400">Version {selectedVersion.version} · {Object.keys(project.files).length} files</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="secondary" size="sm" onClick={createFile}><Plus size={14} />File</Button>
+                <Button type="button" variant="secondary" size="sm" onClick={createFolder}><FolderPlus size={14} />Folder</Button>
+                <Button type="button" variant="secondary" size="sm" onClick={removeFile} disabled={!selectedFile}><Trash2 size={14} />Delete</Button>
+                <Button type="button" size="sm" onClick={downloadProject} disabled={exporting}>{exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}Export ZIP</Button>
+              </div>
+            </div>
+            <div className="grid min-h-[28rem] min-w-0 lg:grid-cols-[16rem_minmax(0,1fr)]">
+              <div className="border-b border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900 lg:border-b-0 lg:border-r">
+                <p className="px-2 pb-2 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Project files</p>
+                <div className="space-y-1">
+                  {Object.keys(project.files).map((path) => <button key={path} type="button" onClick={() => setSelectedFile(path)} className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs font-medium ${selectedFile === path ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-200' : 'text-slate-600 hover:bg-white dark:text-slate-300 dark:hover:bg-slate-800'}`}><FileCode2 size={14} />{path}</button>)}
+                </div>
+              </div>
+              <div className="flex min-h-[28rem] min-w-0 flex-col bg-[#101827]">
+                <div className="flex min-w-0 items-center justify-between gap-3 border-b border-slate-700 px-4 py-2 text-xs text-slate-400"><span className="min-w-0 break-all">{selectedFile || 'Select a file'}</span><Button type="button" size="sm" onClick={saveFile} disabled={!selectedFile || savingFile}>{savingFile ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}Save</Button></div>
+                <textarea value={fileContent} onChange={(event) => setFileContent(event.target.value)} spellCheck={false} disabled={!selectedFile} className="min-h-[25rem] w-full min-w-0 flex-1 resize-none bg-transparent p-4 font-mono text-[13px] leading-6 text-slate-100 outline-none sm:p-5" />
+              </div>
+            </div>
+          </Card>
+        )}
+
         {/* Versions */}
-        <Card className="mt-5 p-6">
+        <Card className="mt-5 min-w-0 p-5 sm:p-6">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="font-bold text-slate-950 dark:text-white">
@@ -1033,8 +1220,29 @@ export function McpDetailPage() {
           )}
         </Card>
 
+        <Card className="mt-5 min-w-0 p-5 sm:p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="font-bold text-slate-950 dark:text-white">Runtime logs</h2>
+              <p className="mt-1 text-xs text-slate-500">Persisted diagnostics for the selected MCP version.</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <Badge className={runtimeLogs.some((entry) => entry.level === 'error') ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}>
+                {runtimeLogs.some((entry) => entry.level === 'error') ? 'Error' : runtimeLogs.length ? 'Healthy' : 'Idle'}
+              </Badge>
+              <Button type="button" variant="outline" size="sm" onClick={() => void loadRuntimeLogs()} disabled={loadingRuntimeLogs || !selectedVersion}>
+                {loadingRuntimeLogs ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                Refresh
+              </Button>
+            </div>
+          </div>
+          <div className="mt-4 max-h-72 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-[11px] leading-5">
+            {loadingRuntimeLogs ? <p className="text-slate-500">Loading runtime logs...</p> : runtimeLogs.length === 0 ? <p className="text-slate-500">No runtime logs for this version yet.</p> : <>{runtimeLogsTruncated && <p className="mb-2 text-amber-300">Showing the latest retained log entries.</p>}{runtimeLogs.map((entry, index) => <div key={`${entry.time}-${index}`} className={entry.level === 'error' ? 'text-rose-300' : 'text-emerald-300'}><span className="mr-2 text-slate-500">{new Date(entry.time).toLocaleTimeString()}</span>{entry.message}</div>)}</>}
+          </div>
+        </Card>
+
         {/* Tools */}
-        <Card className="mt-5 p-6">
+        <Card className="mt-5 min-w-0 p-5 sm:p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <h2 className="font-bold text-slate-950 dark:text-white">
@@ -1081,6 +1289,13 @@ export function McpDetailPage() {
             </div>
           </div>
 
+          {runtimeError && (
+            <div className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-4 dark:border-rose-500/30 dark:bg-rose-500/10">
+              <p className="text-xs font-bold uppercase tracking-wider text-rose-600 dark:text-rose-300">MCP runtime error</p>
+              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-xs leading-5 text-rose-700 dark:text-rose-200">{runtimeError}</pre>
+            </div>
+          )}
+
           {versions.length === 0 ? (
             <EmptyState
               icon={TerminalSquare}
@@ -1114,7 +1329,7 @@ export function McpDetailPage() {
               </p>
             </div>
           ) : (
-            <div className="mt-6 grid gap-5 lg:grid-cols-[.7fr_1.3fr]">
+            <div className="mt-6 grid min-w-0 gap-5 lg:grid-cols-[minmax(0,.7fr)_minmax(0,1.3fr)]">
 
               {/* Tool list */}
               <div className="space-y-2">
@@ -1177,7 +1392,7 @@ export function McpDetailPage() {
               </div>
 
               {/* Tool invocation */}
-              <div className="rounded-xl border border-slate-200 p-5 dark:border-slate-700">
+              <div className="min-w-0 rounded-xl border border-slate-200 p-4 sm:p-5 dark:border-slate-700">
 
                 <div className="flex items-center justify-between gap-3">
                   <div>

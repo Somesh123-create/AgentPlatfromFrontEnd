@@ -1,15 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bot,
   CheckCircle2,
   Download,
+  FileUp,
   FileCode2,
   FolderPlus,
   Loader2,
   MessageSquare,
   Play,
   Plus,
+  MessageCircle,
+  Trash2,
   Save,
   Send,
   TerminalSquare,
@@ -33,7 +36,10 @@ import {
   listAgentBuilds,
   listAgentConversations,
   listAgentMessages,
-  runAgentBuild,
+  publishAgent,
+  listAgentRuntimeLogs,
+  uploadAgent,
+  deleteAgentPath,
   sendAgentMessage,
   updateAgent,
   updateAgentFile,
@@ -41,6 +47,8 @@ import {
   type AgentConversation,
   type AgentDraft,
   type AgentMessage,
+  type AgentFramework,
+  type AgentRuntimeLog,
 } from "@/lib/api";
 
 export function AgentDetailPage() {
@@ -60,10 +68,7 @@ export function AgentDetailPage() {
   const [exporting, setExporting] = useState(false);
   const [builds, setBuilds] = useState<AgentBuild[]>([]);
   const [building, setBuilding] = useState(false);
-  const [runningBuild, setRunningBuild] = useState(false);
-  const [runPrompt, setRunPrompt] = useState("");
-  const [runOutput, setRunOutput] = useState<string | null>(null);
-  const [showCode, setShowCode] = useState(false);
+  const [activeTab, setActiveTab] = useState<"workspace" | "chat">("workspace");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState("");
   const [savingFile, setSavingFile] = useState(false);
@@ -71,6 +76,17 @@ export function AgentDetailPage() {
   const [projectDirectory, setProjectDirectory] = useState("");
   const [projectRevision, setProjectRevision] = useState(0);
   const [selectedBuildId, setSelectedBuildId] = useState<number | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState<number | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [runtimeLogs, setRuntimeLogs] = useState<AgentRuntimeLog[]>([]);
+  const [runtimeLogsTruncated, setRuntimeLogsTruncated] = useState(false);
+  const [loadingRuntimeLogs, setLoadingRuntimeLogs] = useState(false);
+  const [latestBuildId, setLatestBuildId] = useState<number | null>(null);
+  const [showBuildLogs, setShowBuildLogs] = useState(false);
+  const [framework, setFramework] = useState<AgentFramework>("GOOGLE_ADK");
+  const [uploading, setUploading] = useState(false);
+  const uploadInput = useRef<HTMLInputElement>(null);
+  const messagesEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!token || !Number.isFinite(agentId)) {
@@ -84,10 +100,13 @@ export function AgentDetailPage() {
     ])
       .then(async ([loadedAgent, loadedConversations, loadedBuilds]) => {
         setAgent(loadedAgent);
+        setSelectedModelId(loadedAgent.llm_models?.[0]?.model_id || loadedAgent.llm_model_id || null);
+        setFramework(loadedAgent.framework);
         setProjectDirectory(loadedAgent.project_directory || "agent-project");
         setProjectRevision(loadedAgent.project_revision);
         setConversations(loadedConversations);
         setBuilds(loadedBuilds);
+        setLatestBuildId(loadedBuilds[0]?.id || null);
         const successfulBuilds = loadedBuilds.filter(
           (item) => item.status === "SUCCEEDED",
         );
@@ -127,16 +146,58 @@ export function AgentDetailPage() {
     );
   }, [selectedFile, agent]);
 
+  useEffect(() => {
+    messagesEnd.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const loadRuntimeLogs = async () => {
+    if (!token || !Number.isFinite(agentId) || !selectedBuildId) {
+      setRuntimeLogs([]);
+      return;
+    }
+    setLoadingRuntimeLogs(true);
+    try {
+      const result = await listAgentRuntimeLogs(token, agentId, builds.find((item) => item.id === selectedBuildId)?.version);
+      setRuntimeLogs(result.entries);
+      setRuntimeLogsTruncated(result.truncated);
+    } catch (error) {
+      setRuntimeLogs([]);
+      show("Unable to load runtime logs", error instanceof Error ? error.message : "Request failed.");
+    } finally {
+      setLoadingRuntimeLogs(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadRuntimeLogs();
+  }, [token, agentId, selectedBuildId]);
+
+  const removePath = async (path: string) => {
+    if (!token || !window.confirm(`Delete ${path}?`)) return;
+    try {
+      const updated = await deleteAgentPath(token, agentId, path, projectRevision);
+      setAgent(updated);
+      setProjectRevision(updated.project_revision);
+      if (selectedFile === path || selectedFile?.startsWith(`${path}/`)) setSelectedFile(null);
+      show("Project item deleted", path);
+    } catch (error) {
+      show("Delete failed", error instanceof Error ? error.message : "Unable to delete project item.");
+    }
+  };
+
   const generateCode = async () => {
-    if (!token) return;
+    if (!token || !agent) return;
     setGenerating(true);
     try {
+      if (framework !== agent.framework) {
+        await updateAgent(token, agentId, { framework });
+      }
       const generated = await generateAgent(token, agentId);
       setAgent(generated);
       setProjectDirectory(generated.project_directory || "agent-project");
       setProjectRevision(generated.project_revision);
       setSelectedFile(Object.keys(generated.files)[0] || null);
-      setShowCode(true);
+      setActiveTab("workspace");
       show(
         "Code generated",
         "The project files were updated from the current MCP and LLM configuration.",
@@ -148,6 +209,24 @@ export function AgentDetailPage() {
       );
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const uploadProject = async (file: File) => {
+    if (!token) return;
+    setUploading(true);
+    try {
+      const uploaded = await uploadAgent(token, agentId, file);
+      setAgent(uploaded);
+      setProjectRevision(uploaded.project_revision);
+      setSelectedFile(Object.keys(uploaded.files)[0] || null);
+      setActiveTab("workspace");
+      show("Project uploaded", `${Object.keys(uploaded.files).length} files imported.`);
+    } catch (error) {
+      show("Upload failed", error instanceof Error ? error.message : "Unable to upload project.");
+    } finally {
+      setUploading(false);
+      if (uploadInput.current) uploadInput.current.value = "";
     }
   };
 
@@ -208,7 +287,7 @@ export function AgentDetailPage() {
       setAgent(updated);
       setProjectRevision(updated.project_revision);
       setSelectedFile(path);
-      setShowCode(true);
+      setActiveTab("workspace");
     } catch (error) {
       show(
         "File creation failed",
@@ -229,7 +308,7 @@ export function AgentDetailPage() {
       );
       setAgent(updated);
       setProjectRevision(updated.project_revision);
-      setShowCode(true);
+      setActiveTab("workspace");
       show("Folder created", path);
     } catch (error) {
       show(
@@ -291,6 +370,7 @@ export function AgentDetailPage() {
           conversation.id,
           text,
           selectedBuildId,
+          selectedModelId,
         ),
       );
     } catch (error) {
@@ -301,6 +381,20 @@ export function AgentDetailPage() {
       );
     } finally {
       setSending(false);
+    }
+  };
+
+  const publish = async () => {
+    if (!token || !agent || !builds.some((item) => item.status === "SUCCEEDED")) return;
+    setPublishing(true);
+    try {
+      const published = await publishAgent(token, agentId);
+      setAgent(published);
+      show("Agent published", `${published.name} is now published.`);
+    } catch (error) {
+      show("Publish failed", error instanceof Error ? error.message : "Unable to publish agent.");
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -333,8 +427,23 @@ export function AgentDetailPage() {
     try {
       const build = await buildAgent(token, agentId);
       setBuilds((items) => [build, ...items]);
-      if (build.status === "SUCCEEDED" && !selectedBuildId)
+      setLatestBuildId(build.id);
+      if (build.status === "SUCCEEDED" && !selectedBuildId) {
         setSelectedBuildId(build.id);
+        try {
+          const updated = await updateAgent(token, agentId, {
+            default_build_id: build.id,
+          });
+          setAgent(updated);
+        } catch (error) {
+          show(
+            "Default build selection failed",
+            error instanceof Error
+              ? error.message
+              : "Unable to save the default build.",
+          );
+        }
+      }
       show(
         build.status === "SUCCEEDED" ? "Image built" : "Build failed",
         build.error || build.image_ref || "Build completed.",
@@ -346,34 +455,6 @@ export function AgentDetailPage() {
       );
     } finally {
       setBuilding(false);
-    }
-  };
-
-  const runBuild = async () => {
-    const build = builds.find((item) => item.status === "SUCCEEDED");
-    if (!token || !build || !runPrompt.trim()) {
-      show(
-        "Enter a prompt",
-        "Build a successful image and enter a prompt first.",
-      );
-      return;
-    }
-    setRunningBuild(true);
-    try {
-      const result = await runAgentBuild(
-        token,
-        agentId,
-        build.id,
-        runPrompt.trim(),
-      );
-      setRunOutput(result.output || result.error || "No output returned.");
-    } catch (error) {
-      show(
-        "Built agent failed",
-        error instanceof Error ? error.message : "Unable to run built agent.",
-      );
-    } finally {
-      setRunningBuild(false);
     }
   };
 
@@ -448,6 +529,7 @@ export function AgentDetailPage() {
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{agent.status}</Badge>
             <Badge>{agent.framework}</Badge>
+            {builds.some((item) => item.status === "SUCCEEDED") && agent.status !== "PUBLISHED" && <Button type="button" size="sm" onClick={() => void publish()} disabled={publishing}>{publishing ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />} Publish</Button>}
             <Link to="/llm-settings">
               <Button type="button" size="sm" variant="outline">
                 Configure model
@@ -455,8 +537,16 @@ export function AgentDetailPage() {
             </Link>
           </div>
         </header>
+        <div className="mt-6 flex gap-2 border-b border-slate-200 dark:border-slate-800">
+          <button type="button" onClick={() => setActiveTab("workspace")} className={`inline-flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-bold ${activeTab === "workspace" ? "border-blue-600 text-blue-600" : "border-transparent text-slate-400"}`}>
+            <FileCode2 size={16} /> Project workspace
+          </button>
+          <button type="button" onClick={() => setActiveTab("chat")} className={`inline-flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-bold ${activeTab === "chat" ? "border-blue-600 text-blue-600" : "border-transparent text-slate-400"}`}>
+            <MessageCircle size={16} /> Agent chat
+          </button>
+        </div>
         <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <section className="flex min-h-[620px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+          {activeTab === "chat" ? <section className="flex h-[min(720px,calc(100vh-220px))] min-h-[520px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4 dark:border-slate-800">
               <div className="flex items-center gap-2">
                 <MessageSquare size={17} className="text-blue-600" />
@@ -479,7 +569,7 @@ export function AgentDetailPage() {
                 New chat
               </Button>
             </div>
-            <div className="flex-1 space-y-4 overflow-y-auto p-4 sm:p-6">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-6">
               {messages.length === 0 ? (
                 <div className="flex min-h-72 flex-col items-center justify-center text-center">
                   <Bot size={30} className="text-slate-300" />
@@ -499,6 +589,7 @@ export function AgentDetailPage() {
                   <ChatMessage key={message.id} message={message} />
                 ))
               )}
+              <div ref={messagesEnd} />
             </div>
             <form
               onSubmit={send}
@@ -529,27 +620,27 @@ export function AgentDetailPage() {
                 </Button>
               </div>
             </form>
-          </section>
+          </section> : <CodeWorkspace
+            agent={agent}
+            projectDirectory={projectDirectory}
+            selectedFile={selectedFile}
+            content={fileContent}
+            saving={savingFile}
+            onDirectoryChange={setProjectDirectory}
+            onDirectorySave={saveProjectDirectory}
+            onFileSelect={setSelectedFile}
+            onContentChange={setFileContent}
+            onSave={saveFile}
+            onCreateFile={createFile}
+            onCreateFolder={createFolder}
+            onDelete={removePath}
+          />}
           <aside className="space-y-5">
             <Card className="p-5">
               <PanelTitle icon={Play} title="Runtime" />
               <div className="mt-4 space-y-3 text-sm">
-                <StatusRow
-                  label="Model"
-                  value={agent.llm_model_name || "Not selected"}
-                />
-                <StatusRow
-                  label="Provider"
-                  value={agent.llm_provider || "Not selected"}
-                />
-                <StatusRow
-                  label="MCP server"
-                  value={`Server #${agent.mcp_id}`}
-                />
-                <StatusRow
-                  label="MCP version"
-                  value={`Version ${agent.mcp_version}`}
-                />
+                <div><p className="text-xs text-slate-400">Configured models</p><div className="mt-2 space-y-1">{(agent.llm_models?.length ? agent.llm_models : [{ model_id: agent.llm_model_id || 0, model_name: agent.llm_model_name || "Not selected", provider: agent.llm_provider || "" }]).map((model) => <button key={model.model_id} type="button" onClick={() => setSelectedModelId(model.model_id)} className={`block w-full rounded-lg px-2 py-1 text-left text-xs font-semibold ${selectedModelId === model.model_id ? "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" : "text-slate-600 dark:text-slate-300"}`}>{model.display_name || model.model_name} · {model.provider}</button>)}</div></div>
+                <div><p className="text-xs text-slate-400">Configured MCP servers</p><div className="mt-2 space-y-1">{(agent.mcp_connections?.length ? agent.mcp_connections : [{ mcp_id: agent.mcp_id, mcp_version: agent.mcp_version, mcp_version_id: agent.mcp_version_id }]).map((connection) => <div key={`${connection.mcp_id}-${connection.mcp_version_id}`} className="rounded-lg bg-slate-50 px-2 py-2 text-xs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-300">{connection.name || `MCP server #${connection.mcp_id}`} · Version {connection.mcp_version}</div>)}</div></div>
                 <StatusRow label="API key" value="Managed securely" />
               </div>
             </Card>
@@ -571,13 +662,39 @@ export function AgentDetailPage() {
                     .filter((item) => item.status === "SUCCEEDED")
                     .map((build) => (
                       <option key={build.id} value={build.id}>
-                        Build #{build.id} · {new Date(build.created_at).toLocaleString()}
+                        v{build.version} · {build.image_ref || "No image reference"} · {new Date(build.created_at).toLocaleString()}
                       </option>
                     ))}
                 </select>
                 <p className="text-xs leading-5 text-slate-400">
                   Chat runs inside this build, including its configured MCP tools. The selected version becomes the default.
                 </p>
+                {latestBuildId && (() => {
+                  const latestBuild = builds.find((item) => item.id === latestBuildId);
+                  if (!latestBuild || latestBuild.status === "SUCCEEDED") return null;
+                  return (
+                    <div className="rounded-xl border border-red-200 bg-red-50 p-3 dark:border-red-900/60 dark:bg-red-950/20">
+                      <p className="text-xs font-bold text-red-700 dark:text-red-300">
+                        Build {latestBuild.status.toLowerCase()}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-red-600 dark:text-red-300">
+                        {latestBuild.error || "The container image could not be built."}
+                      </p>
+                      {latestBuild.logs && (
+                        <button type="button" onClick={() => setShowBuildLogs((value) => !value)} className="mt-2 text-xs font-bold text-red-700 underline dark:text-red-300">
+                          {showBuildLogs ? "Hide build logs" : "Show build logs"}
+                        </button>
+                      )}
+                      {showBuildLogs && <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-[10px] leading-4 text-slate-200">{latestBuild.logs}</pre>}
+                    </div>
+                  );
+                })()}
+              </div>
+            </Card>
+            <Card className="p-5">
+              <div className="flex items-center justify-between gap-3"><PanelTitle icon={TerminalSquare} title="Runtime logs" /><Button type="button" variant="outline" size="sm" onClick={() => void loadRuntimeLogs()} disabled={loadingRuntimeLogs || !selectedBuildId}>{loadingRuntimeLogs ? <Loader2 size={13} className="animate-spin" /> : "Refresh"}</Button></div>
+              <div className="mt-3 max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-[10px] leading-5">
+                {loadingRuntimeLogs ? <p className="text-slate-500">Loading logs...</p> : runtimeLogs.length === 0 ? <p className="text-slate-500">No runtime logs for this build.</p> : <>{runtimeLogsTruncated && <p className="mb-2 text-amber-300">Showing latest retained entries.</p>}{runtimeLogs.map((entry, index) => <div key={`${entry.time}-${index}`} className={entry.level === "error" ? "text-rose-300" : "text-emerald-300"}><span className="mr-2 text-slate-500">{new Date(entry.time).toLocaleTimeString()}</span>{entry.message}</div>)}</>}
               </div>
             </Card>
             <Card className="p-5">
@@ -601,6 +718,14 @@ export function AgentDetailPage() {
             <Card className="p-5">
               <PanelTitle icon={Wrench} title="Agent operations" />
               <div className="mt-4 grid gap-2">
+                <label className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                  Generation framework
+                  <select value={agent.framework} disabled className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-3 text-sm font-normal text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                    <option value={agent.framework}>
+                      {agent.framework === "GOOGLE_ADK" ? "Google ADK" : "LangGraph"}
+                    </option>
+                  </select>
+                </label>
                 <Button
                   type="button"
                   className="w-full"
@@ -616,19 +741,20 @@ export function AgentDetailPage() {
                     ? "Generating..."
                     : agent.status === "GENERATED"
                       ? "Regenerate code"
-                      : "Generate sample code"}
+                      : "Generate code"}
                 </Button>
                 <Button
                   type="button"
                   variant="outline"
                   className="w-full"
-                  disabled={!Object.keys(agent.files || {}).length}
-                  onClick={() => setShowCode((value) => !value)}
+                  disabled={uploading}
+                  onClick={() => uploadInput.current?.click()}
                 >
-                  <FileCode2 size={15} />
-                  {showCode ? "Hide code view" : "View existing code"}
+                  {uploading ? <Loader2 size={15} className="animate-spin" /> : <FileUp size={15} />}
+                  Upload agent ZIP
                 </Button>
-                <Link to="/agents">
+                <input ref={uploadInput} type="file" accept=".zip,application/zip" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadProject(file); }} />
+                <Link to={`/agents?edit=${agent.id}`}>
                   <Button type="button" variant="outline" className="w-full">
                     <FileCode2 size={15} />
                     Edit configuration
@@ -650,7 +776,7 @@ export function AgentDetailPage() {
                   ) : (
                     <Download size={15} />
                   )}{" "}
-                  {exporting ? "Exporting..." : "Export generated files"}
+                  {exporting ? "Exporting..." : "Export code"}
                 </Button>
                 <Button
                   type="button"
@@ -670,34 +796,6 @@ export function AgentDetailPage() {
                   )}{" "}
                   {building ? "Building..." : "Build image"}
                 </Button>
-                <div className="mt-2 border-t border-slate-100 pt-3 dark:border-slate-800">
-                  <Input
-                    value={runPrompt}
-                    onChange={(event) => setRunPrompt(event.target.value)}
-                    placeholder="Prompt built agent"
-                  />
-                  <Button
-                    type="button"
-                    className="mt-2 w-full"
-                    disabled={
-                      runningBuild ||
-                      !builds.some((item) => item.status === "SUCCEEDED")
-                    }
-                    onClick={runBuild}
-                  >
-                    {runningBuild ? (
-                      <Loader2 size={15} className="animate-spin" />
-                    ) : (
-                      <Send size={15} />
-                    )}{" "}
-                    Run built agent
-                  </Button>
-                  {runOutput && (
-                    <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-slate-200">
-                      {runOutput}
-                    </pre>
-                  )}
-                </div>
                 <p className="text-xs leading-5 text-slate-400">
                   Builds run with short-lived runtime credentials; provider keys
                   stay in the LLM service.
@@ -706,22 +804,6 @@ export function AgentDetailPage() {
             </Card>
           </aside>
         </div>
-        {showCode && (
-          <CodeWorkspace
-            agent={agent}
-            projectDirectory={projectDirectory}
-            selectedFile={selectedFile}
-            content={fileContent}
-            saving={savingFile}
-            onDirectoryChange={setProjectDirectory}
-            onDirectorySave={saveProjectDirectory}
-            onFileSelect={setSelectedFile}
-            onContentChange={setFileContent}
-            onSave={saveFile}
-            onCreateFile={createFile}
-            onCreateFolder={createFolder}
-          />
-        )}
       </main>
     </WorkspaceLayout>
   );
@@ -740,6 +822,7 @@ function CodeWorkspace({
   onSave,
   onCreateFile,
   onCreateFolder,
+  onDelete,
 }: {
   agent: AgentDraft;
   projectDirectory: string;
@@ -753,10 +836,16 @@ function CodeWorkspace({
   onSave: () => void;
   onCreateFile: () => void;
   onCreateFolder: () => void;
+  onDelete: (path: string) => void;
 }) {
   const files = Object.keys(agent.files || {}).sort();
+  const folders = Array.from(new Set(files.flatMap((path) => {
+    const parts = path.split("/");
+    return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
+  }))).sort();
+  const entries = [...folders.map((path) => ({ path, folder: true })), ...files.map((path) => ({ path, folder: false }))].sort((left, right) => left.path.localeCompare(right.path) || Number(right.folder) - Number(left.folder));
   return (
-    <section className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+    <section className="mt-6 flex h-[calc(100vh-270px)] min-h-[620px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4 dark:border-slate-800">
         <div>
           <p className="text-xs font-bold uppercase tracking-[.14em] text-slate-400">
@@ -798,6 +887,17 @@ function CodeWorkspace({
             )}
             Save file
           </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!selectedFile || saving}
+            onClick={() => selectedFile && onDelete(selectedFile)}
+            className="border-red-200 text-red-600 hover:border-red-300 hover:bg-red-50 dark:border-red-900/60 dark:text-red-300 dark:hover:bg-red-950/30"
+          >
+            <Trash2 size={14} />
+            Delete file
+          </Button>
         </div>
       </div>
       <div className="border-b border-slate-100 p-4 dark:border-slate-800">
@@ -816,18 +916,22 @@ function CodeWorkspace({
           API keys stay in the managed LLM service.
         </p>
       </div>
-      <div className="grid min-h-[420px] md:grid-cols-[240px_minmax(0,1fr)]">
-        <nav className="border-b border-slate-100 p-3 dark:border-slate-800 md:border-b-0 md:border-r">
+      <div className="grid min-h-0 flex-1 md:grid-cols-[240px_minmax(0,1fr)]">
+        <nav className="min-h-0 overflow-y-auto border-b border-slate-100 p-3 dark:border-slate-800 md:border-b-0 md:border-r">
           {files.length ? (
-            files.map((path) => (
-              <button
-                key={path}
-                type="button"
-                onClick={() => onFileSelect(path)}
-                className={`block w-full truncate rounded-lg px-3 py-2 text-left text-xs ${selectedFile === path ? "bg-blue-50 font-bold text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" : "text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800"}`}
-              >
-                {path}
-              </button>
+            entries.map(({ path, folder }) => (
+              <div key={`${folder ? "folder" : "file"}-${path}`} className="group flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={folder}
+                  onClick={() => onFileSelect(path)}
+                  className={`min-w-0 flex-1 truncate rounded-lg px-2 py-2 text-left text-xs ${selectedFile === path ? "bg-blue-50 font-bold text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" : folder ? "font-semibold text-slate-600 dark:text-slate-300" : "text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800"}`}
+                  style={{ paddingLeft: `${8 + path.split("/").length * 8}px` }}
+                >
+                  {folder ? "▾ " : ""}{folder ? path.split("/").pop() : path.split("/").pop()}
+                </button>
+                <button type="button" aria-label={`Delete ${path}`} onClick={() => onDelete(path)} className="invisible shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 group-hover:visible"><Trash2 size={13} /></button>
+              </div>
             ))
           ) : (
             <p className="p-3 text-xs text-slate-400">
@@ -835,7 +939,7 @@ function CodeWorkspace({
             </p>
           )}
         </nav>
-        <div className="flex min-h-[420px] flex-col">
+        <div className="flex min-h-0 flex-col">
           <div className="border-b border-slate-100 px-4 py-3 text-xs font-semibold text-slate-500 dark:border-slate-800">
             {selectedFile || "No file selected"}
           </div>
@@ -843,7 +947,7 @@ function CodeWorkspace({
             value={content}
             onChange={(event) => onContentChange(event.target.value)}
             disabled={!selectedFile}
-            className="min-h-[360px] flex-1 resize-none bg-slate-950 p-5 font-mono text-xs leading-5 text-slate-200 outline-none"
+            className="min-h-0 flex-1 resize-none overflow-auto bg-slate-950 p-5 font-mono text-xs leading-5 text-slate-200 outline-none"
             spellCheck={false}
             placeholder="Select a file to edit its contents."
           />

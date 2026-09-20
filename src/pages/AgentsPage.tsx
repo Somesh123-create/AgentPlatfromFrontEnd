@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import {
   Bot,
   Check,
@@ -9,7 +10,6 @@ import {
   Plus,
   Save,
   Search,
-  Sparkles,
   Trash2,
   X,
 } from "lucide-react";
@@ -24,7 +24,6 @@ import {
   createAgent,
   buildAgent,
   deleteAgent,
-  generateAgent,
   listAgents,
   listLlmModels,
   listMcps,
@@ -54,6 +53,7 @@ const emptyForm: AgentDraftInput = {
   llm_model_id: null,
   llm_provider: null,
   llm_model_name: null,
+  llm_models: [],
   temperature: 0.2,
   max_output_tokens: 1000,
   project_directory: "agent-project",
@@ -62,6 +62,8 @@ const emptyForm: AgentDraftInput = {
 export function AgentsPage() {
   const { token } = useAuth();
   const { show } = useToast();
+  const [searchParams] = useSearchParams();
+  const requestedEditId = Number(searchParams.get("edit"));
   const [agents, setAgents] = useState<AgentDraft[]>([]);
   const [mcps, setMcps] = useState<Mcp[]>([]);
   const [versions, setVersions] = useState<McpVersion[]>([]);
@@ -71,7 +73,6 @@ export function AgentsPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [generating, setGenerating] = useState(false);
   const [validating, setValidating] = useState(false);
   const [building, setBuilding] = useState(false);
   const [testingAgent, setTestingAgent] = useState(false);
@@ -89,7 +90,11 @@ export function AgentsPage() {
       listLlmModels(token),
     ])
       .then(async ([agentsResult, mcpsResult, modelsResult]) => {
-        if (agentsResult.status === "fulfilled") setAgents(agentsResult.value);
+        if (agentsResult.status === "fulfilled") {
+          setAgents(agentsResult.value);
+          const requested = agentsResult.value.find((item) => item.id === requestedEditId);
+          if (requested) void editAgent(requested);
+        }
         else
           show(
             "Unable to load saved agents",
@@ -114,7 +119,7 @@ export function AgentsPage() {
           );
       })
       .finally(() => setLoading(false));
-  }, [token, show]);
+  }, [token, show, requestedEditId]);
 
   const loadVersions = async (mcpId: number) => {
     if (!token || !mcpId) {
@@ -187,6 +192,27 @@ export function AgentsPage() {
     }));
   };
 
+  const toggleModel = (modelId: number) => {
+    const model = models.find((item) => item.id === modelId);
+    if (!model) return;
+    const selected = form.llm_models.some((item) => item.model_id === modelId);
+    const next = selected
+      ? form.llm_models.filter((item) => item.model_id !== modelId)
+      : [...form.llm_models, {
+          model_id: model.id,
+          provider: model.provider_slug,
+          model_name: model.model_name,
+          display_name: model.display_name,
+        }];
+    setForm((current) => ({
+      ...current,
+      llm_models: next,
+      llm_model_id: next[0]?.model_id || null,
+      llm_provider: next[0]?.provider || null,
+      llm_model_name: next[0]?.model_name || null,
+    }));
+  };
+
   const resetForm = () => {
     setEditingId(null);
     setForm({
@@ -213,6 +239,7 @@ export function AgentsPage() {
       llm_model_id: agent.llm_model_id,
       llm_provider: agent.llm_provider,
       llm_model_name: agent.llm_model_name,
+      llm_models: agent.llm_models || [],
       temperature: agent.temperature,
       max_output_tokens: agent.max_output_tokens,
       project_directory: agent.project_directory || "agent-project",
@@ -251,31 +278,6 @@ export function AgentsPage() {
     }
   };
 
-  const generate = async () => {
-    if (!token || !editingId) {
-      show(
-        "Save the draft first",
-        "Generation starts after the agent draft has been saved.",
-      );
-      return;
-    }
-    setGenerating(true);
-    try {
-      const generated = await generateAgent(token, editingId);
-      setAgents((current) =>
-        current.map((item) => (item.id === generated.id ? generated : item)),
-      );
-      setSelectedFile(Object.keys(generated.files)[0] || null);
-      show("Agent generated", `${generated.name} files are ready to inspect.`);
-    } catch (error) {
-      show(
-        "Generation failed",
-        error instanceof Error ? error.message : "Unable to generate files.",
-      );
-    } finally {
-      setGenerating(false);
-    }
-  };
 
   const remove = async (agent: AgentDraft) => {
     if (!token || !window.confirm(`Delete ${agent.name}?`)) return;
@@ -467,19 +469,7 @@ export function AgentsPage() {
                     show={show}
                   />
                 </div>
-                <SelectField
-                  label="LLM model"
-                  value={String(form.llm_model_id || "")}
-                  onChange={(value) =>
-                    selectModel(value ? Number(value) : null)
-                  }
-                  options={models.map((model) => [
-                    String(model.id),
-                    `${model.display_name} · ${model.provider_slug}`,
-                  ])}
-                  allowEmpty
-                  emptyLabel="No model selected"
-                />
+                <LlmModelPicker models={models} selected={form.llm_models} onToggle={toggleModel} />
               </div>
               <TextArea
                 label="System prompt"
@@ -529,19 +519,6 @@ export function AgentsPage() {
                   )}
                   Save draft
                 </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={generating || !editingId}
-                  onClick={generate}
-                >
-                  {generating ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Sparkles size={16} />
-                  )}
-                  Generate files
-                </Button>
               </div>
             </form>
           </Card>
@@ -574,10 +551,7 @@ export function AgentsPage() {
                       <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-white text-blue-600 dark:bg-slate-900 dark:text-blue-300">
                         <Bot size={16} />
                       </span>
-                      <Link
-                        to={`/agents/${agent.id}`}
-                        className="min-w-0 flex-1"
-                      >
+                      <Link to={`/agents/${agent.id}`} className="min-w-0 flex-1">
                         <p className="truncate text-sm font-bold text-slate-900 hover:text-blue-600 dark:text-white">
                           {agent.name}
                         </p>
@@ -633,6 +607,34 @@ export function AgentsPage() {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Request failed.";
+}
+
+function LlmModelPicker({
+  models,
+  selected,
+  onToggle,
+}: {
+  models: LlmModel[];
+  selected: AgentDraftInput["llm_models"];
+  onToggle: (modelId: number) => void;
+}) {
+  const selectedIds = new Set(selected.map((item) => item.model_id));
+  return (
+    <div className="sm:col-span-2 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
+      <p className="text-xs font-bold uppercase tracking-wider text-slate-400">LLM models</p>
+      <p className="mt-1 text-xs text-slate-500">Select models available for each agent request. The first selected model is the default.</p>
+      <div className="mt-3 space-y-1 rounded-lg bg-slate-50 p-2 dark:bg-slate-950">
+        {models.length === 0 ? <p className="p-3 text-xs text-slate-400">No enabled LLM models available.</p> : models.map((model) => {
+          const isSelected = selectedIds.has(model.id);
+          return <button key={model.id} type="button" onClick={() => onToggle(model.id)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-xs ${isSelected ? "bg-blue-100 text-blue-800 dark:bg-blue-500/15 dark:text-blue-200" : "text-slate-600 hover:bg-white dark:text-slate-300 dark:hover:bg-slate-800"}`}>
+            <span className={`flex h-5 w-5 items-center justify-center rounded border ${isSelected ? "border-blue-600 bg-blue-600 text-white" : "border-slate-300 dark:border-slate-600"}`}>{isSelected && <Check size={13} />}</span>
+            <span className="min-w-0 flex-1"><span className="block truncate font-semibold">{model.display_name}</span><span className="block truncate text-[10px] opacity-70">{model.provider_slug} · {model.model_name}</span></span>
+          </button>;
+        })}
+      </div>
+      {selected.length > 0 && <p className="mt-2 text-[10px] font-semibold text-blue-600">Configured order: {selected.map((item) => item.display_name || item.model_name).join(" → ")}</p>}
+    </div>
+  );
 }
 
 function McpConnectionPicker({

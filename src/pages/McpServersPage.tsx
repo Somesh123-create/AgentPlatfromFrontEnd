@@ -12,6 +12,7 @@ import { useToast } from '@/components/ui/toast'
 
 export function McpServersPage() {
   const { token } = useAuth(); const { show } = useToast(); const [mcps, setMcps] = useState<Mcp[]>([]); const [loading, setLoading] = useState(true); const [creating, setCreating] = useState(false); const [name, setName] = useState(''); const [description, setDescription] = useState(''); const [mcpType, setMcpType] = useState<'LOCAL' | 'REMOTE'>('REMOTE'); const [protocol, setProtocol] = useState<'STDIO' | 'SSE' | 'STREAMABLE_HTTP'>('STREAMABLE_HTTP'); const [access, setAccess] = useState<'PRIVATE' | 'PUBLIC'>('PRIVATE')
+  const changeMcpType = (value: 'LOCAL' | 'REMOTE') => { setMcpType(value); setProtocol(value === 'LOCAL' ? 'STDIO' : protocol === 'STDIO' ? 'STREAMABLE_HTTP' : protocol) }
   useEffect(() => { if (!token) { setLoading(false); return } listMcps(token).then(setMcps).catch(error => show('Unable to load MCP servers', error.message)).finally(() => setLoading(false)) }, [token])
   const submit = async (event: FormEvent) => { event.preventDefault(); if (!token) return; setCreating(true); try { const mcp = await createMcp(token, { name, description, mcp_type: mcpType, protocol, access }); setMcps(items => [mcp, ...items]); setName(''); setDescription(''); show('MCP server created', `${mcp.name} is ready to configure.`) } catch (error) { show('Creation failed', error instanceof Error ? error.message : 'Unable to create MCP server.') } finally { setCreating(false) } }
   const remove = async (mcp: Mcp) => { if (!token || !window.confirm(`Delete ${mcp.name}?`)) return; try { await deleteMcp(token, mcp.id); setMcps(items => items.filter(item => item.id !== mcp.id)); show('MCP server deleted', mcp.name) } catch (error) { show('Delete failed', error instanceof Error ? error.message : 'Unable to delete MCP server.') } }
@@ -21,7 +22,7 @@ export function McpServersPage() {
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">MCP Type</label>
-          <select value={mcpType} onChange={e => setMcpType(e.target.value as 'LOCAL' | 'REMOTE')} className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100">
+          <select value={mcpType} onChange={e => changeMcpType(e.target.value as 'LOCAL' | 'REMOTE')} className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100">
             <option value="LOCAL">LOCAL</option>
             <option value="REMOTE">REMOTE</option>
           </select>
@@ -29,9 +30,7 @@ export function McpServersPage() {
         <div>
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Protocol</label>
           <select value={protocol} onChange={e => setProtocol(e.target.value as 'STDIO' | 'SSE' | 'STREAMABLE_HTTP')} className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100">
-            <option value="STDIO">STDIO</option>
-            <option value="SSE">SSE</option>
-            <option value="STREAMABLE_HTTP">STREAMABLE_HTTP</option>
+            {mcpType === 'LOCAL' ? <option value="STDIO">STDIO</option> : <><option value="SSE">SSE</option><option value="STREAMABLE_HTTP">STREAMABLE_HTTP</option></>}
           </select>
         </div>
         <div className="sm:col-span-2">
