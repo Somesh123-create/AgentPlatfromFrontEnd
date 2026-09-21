@@ -1,7 +1,9 @@
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-const mcpApiBaseUrl = import.meta.env.VITE_MCP_API_BASE_URL || 'http://localhost:8001'
-const agentApiBaseUrl = import.meta.env.VITE_AGENT_API_BASE_URL || 'http://localhost:8002'
-const llmApiBaseUrl = import.meta.env.VITE_LLM_API_BASE_URL || 'http://localhost:8003'
+import config from '../config'
+
+const apiBaseUrl = config.API_BASE_URL
+const mcpApiBaseUrl = config.MCP_API_BASE_URL
+const agentApiBaseUrl = config.AGENT_API_BASE_URL
+const llmApiBaseUrl = config.LLM_API_BASE_URL
 
 type ApiError = { detail?: string }
 
